@@ -5,6 +5,7 @@ if __name__ == '__main__':
 
     _project_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     os.environ['PROJECT_DIR'] = _project_dir
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     sys.path.append(_project_dir)
     del _project_dir
 # <<<

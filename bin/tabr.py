@@ -192,14 +192,15 @@ class Model(nn.Module):
     def forward(
         self,
         *,
-        x_: dict[str, Tensor],
+        x_: dict[str, Tensor], #* BATCH of input data
         y: Optional[Tensor],
         candidate_x_: dict[str, Tensor],
         candidate_y: Tensor,
         context_size: int,
         is_train: bool,
     ) -> Tensor:
-        # >>>
+        # * >>>
+        # * Encoder Module
         with torch.set_grad_enabled(
             torch.is_grad_enabled() and not self.memory_efficient
         ):
@@ -243,11 +244,32 @@ class Model(nn.Module):
         else:
             assert y is None
 
-        # >>>
-        # The search below is optimized for larger datasets and is significantly faster
-        # than the naive solution (keep autograd on + manually compute all pairwise
-        # squared L2 distances + torch.topk).
-        # For smaller datasets, however, the naive solution can actually be faster.
+        # * >>>
+        # * Below is the Retrieval Module Part, where the search is optimized for larger datasets 
+        # * and is significantly faster than the naive solution (keep autograd on + manually compute all pairwise
+        # * squared L2 distances + torch.topk).
+        # * For smaller datasets, however, the naive solution can actually be faster.
+        
+        '''
+        distances = torch.tensor([
+            [0.5, inf, 0.2, 0.3],
+            [0.1, 0.2, inf, 0.3]
+        ])
+
+        context_idx = torch.tensor([
+            [3, 0, 2, 1],
+            [0, 1, 2, 3]
+        ])
+
+        sorted_indices = distances.argsort()[:, :-1]
+        # tensor([[2, 3, 0],
+        #         [0, 1, 3]])
+
+        new_context_idx = context_idx.gather(-1, sorted_indices)
+        # tensor([[2, 1, 3],
+        #         [0, 1, 3]])
+        '''
+        
         batch_size, d_main = k.shape
         device = k.device
         with torch.no_grad():
@@ -267,7 +289,8 @@ class Model(nn.Module):
             )
             if is_train:
                 # NOTE: to avoid leakage, the index i must be removed from the i-th row,
-                # (because of how candidate_k is constructed).
+                # (because of how candidate_k is constructed). This is implemented by setting
+                # self-to-self element as inf within the disntances matrix.
                 distances[
                     context_idx == torch.arange(batch_size, device=device)[:, None]
                 ] = torch.inf
@@ -294,19 +317,31 @@ class Model(nn.Module):
         # and use the same code to compute `similarities` during both
         # training and evaluation.
         similarities = (
-            -k.square().sum(-1, keepdim=True)
-            + (2 * (k[..., None, :] @ context_k.transpose(-1, -2))).squeeze(-2)
-            - context_k.square().sum(-1)
+            -k.square().sum(-1, keepdim=True) # [batch_size, 1]
+            + (2 * (k[..., None, :] @ context_k.transpose(-1, -2))).squeeze(-2) # k[..., None, :] -> [batch_size, 1, d_main]
+                                                                                # context_k -> [batch_size, context_size, d_main]
+                                                                                # context_k.transpose(-1, -2) -> [batch_size, d_main, context_size]
+                                                                                # (k[..., None, :] @ context_k.transpose(-1, -2)) -> [batch_size, 1, context_size]
+                                                                                # squeeze(-2) -> [batch_size, context_size]
+            - context_k.square().sum(-1) # [batch_size, context_size]
         )
-        probs = F.softmax(similarities, dim=-1)
+        probs = F.softmax(similarities, dim=-1)                                 # probs -> [batch_size, context_size]
         probs = self.dropout(probs)
 
-        context_y_emb = self.label_encoder(candidate_y[context_idx][..., None])
-        values = context_y_emb + self.T(k[:, None] - context_k)
-        context_x = (probs[:, None] @ values).squeeze(1)
+        context_y_emb = self.label_encoder(candidate_y[context_idx][..., None]) # candidate_y -> [n_candidates]
+                                                                                # candidate_y[context_idx] -> same as context_idx, [batch_dize, context_size]
+                                                                                # candidate_y[context_idx][..., None] -> [batch_size, context_size, 1]
+                                                                                # self.label_encoder -> [batch_size, context_size, d_main]
+        
+        values = context_y_emb + self.T(k[:, None] - context_k)                 # k[:, None] -> [batch_size, 1, d_main], context_k -> [batch_size, context_size, d_main]
+                                                                                # self.T -> [batch_size, context_size, d_main]
+                                                                                
+        context_x = (probs[:, None] @ values).squeeze(1)                        # probs[:, None] -> [batch_size, 1, context_size]
+                                                                                # squeeze(1), [batch_size, 1, d_main] -> [batch_size, d_main]
         x = x + context_x
 
-        # >>>
+        # * >>> 
+        # * Predictor Module
         for block in self.blocks1:
             x = x + block(x)
         x = self.head(x)
