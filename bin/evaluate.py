@@ -44,6 +44,10 @@ def main(
         template_config = lib.load_config(path / '0.toml')
 
     function_: lib.Function = lib.import_(function_qualname)
+    
+    #! for quick evaluation
+    n_seeds = 1
+    
     for seed in range(n_seeds):
         config = deepcopy(template_config)
         config['seed'] = seed
